@@ -6,10 +6,32 @@ const progressFill = document.getElementById('progress-fill');
 const statusText = document.getElementById('status-text');
 const downloadBtn = document.getElementById('download-btn');
 
-// Global variable to hold the final processed URL
 let downloadUrl = null;
 
+// The RNNoise WASM module instance
+let rnnoiseModule = null;
+
+// Initialize RNNoise when the page loads
+async function initRNNoise() {
+    try {
+        // The @ricky0123/rnnoise library exposes rnnoise as a global if loaded via script tag
+        // We load the WASM module.
+        rnnoiseModule = await rnnoise.load();
+        console.log("RNNoise AI Model Loaded.");
+    } catch (e) {
+        console.error("Failed to load RNNoise:", e);
+        statusText.innerText = "Error loading AI model. Check console.";
+        statusText.style.color = "red";
+    }
+}
+initRNNoise();
+
 fileInput.addEventListener('change', async function(e) {
+    if (!rnnoiseModule) {
+        alert("AI model is still loading. Please wait a moment.");
+        return;
+    }
+
     const file = e.target.files[0];
     if (!file) return;
 
@@ -17,69 +39,107 @@ fileInput.addEventListener('change', async function(e) {
     progressWrapper.style.display = 'block';
     downloadBtn.style.display = 'none';
     
-    statusText.innerText = "Loading file into memory...";
+    statusText.innerText = "Loading and Decoding...";
     progressFill.style.width = "10%";
 
     try {
-        // 1. Read file as an ArrayBuffer
+        // 1. Decode Audio
         const arrayBuffer = await file.arrayBuffer();
-        
-        // 2. Decode Audio (Browser handles this efficiently)
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        statusText.innerText = "Decoding audio data...";
-        progressFill.style.width = "20%";
+        let audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
         
-        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+        // RNNoise strictly requires a 48kHz sample rate.
+        // If the audio is not 48kHz, we must resample it.
+        if (audioBuffer.sampleRate !== 48000) {
+             statusText.innerText = "Resampling to 48kHz for AI processing...";
+             progressFill.style.width = "20%";
+             const offlineCtx = new OfflineAudioContext(1, audioBuffer.duration * 48000, 48000);
+             const source = offlineCtx.createBufferSource();
+             source.buffer = audioBuffer;
+             source.connect(offlineCtx.destination);
+             source.start(0);
+             audioBuffer = await offlineCtx.startRendering();
+        }
+
+        statusText.innerText = "Initializing AI Noise Suppression...";
+        progressFill.style.width = "30%";
+
+        // 2. Prepare the data
+        // RNNoise operates on mono audio. We will process only the first channel.
+        const inputData = audioBuffer.getChannelData(0); 
+        const outputData = new Float32Array(inputData.length);
         
-        // 3. Prepare to process in safe chunks
-        const offlineCtx = new OfflineAudioContext(
-            audioBuffer.numberOfChannels, 
-            audioBuffer.length, 
-            audioBuffer.sampleRate
-        );
+        // RNNoise processes EXACTLY 480 samples at a time.
+        const frameSize = 480;
         
-        const source = offlineCtx.createBufferSource();
-        source.buffer = audioBuffer;
+        // Create an instance of the denoiser
+        const denoiser = rnnoiseModule.create();
 
-        // 4. Vocal Isolation Filters
-        // Cut off low rumbles (AC, traffic)
-        const highpass = offlineCtx.createBiquadFilter();
-        highpass.type = 'highpass';
-        highpass.frequency.value = 300; 
+        // 3. Process Chunk by Chunk
+        let offset = 0;
+        const totalFrames = Math.floor(inputData.length / frameSize);
+        let currentFrame = 0;
 
-        // Cut off high hiss (Static, fans)
-        const lowpass = offlineCtx.createBiquadFilter();
-        lowpass.type = 'lowpass';
-        lowpass.frequency.value = 3400;
+        // We use a recursive function with requestAnimationFrame to prevent blocking the UI
+        function processNextChunk() {
+            // Process a batch of frames per UI update so it doesn't take forever,
+            // but small enough so the browser doesn't freeze.
+            const framesPerBatch = 100; 
+            
+            for (let i = 0; i < framesPerBatch && offset + frameSize <= inputData.length; i++) {
+                // Get the next 480 samples
+                const frame = inputData.subarray(offset, offset + frameSize);
+                
+                // Process the frame through the AI model
+                const cleanFrame = denoiser.process(frame);
+                
+                // Write the cleaned samples back out
+                outputData.set(cleanFrame, offset);
+                
+                offset += frameSize;
+                currentFrame++;
+            }
 
-        // Chain them together: Source -> Highpass -> Lowpass -> Output
-        source.connect(highpass);
-        highpass.connect(lowpass);
-        lowpass.connect(offlineCtx.destination);
-        
-        source.start(0);
+            // Update Progress Bar
+            const percentComplete = 30 + Math.floor((currentFrame / totalFrames) * 60);
+            progressFill.style.width = percentComplete + "%";
+            statusText.innerText = `Removing noise... ${Math.floor((currentFrame / totalFrames) * 100)}%`;
 
-        statusText.innerText = "Applying voice isolation filters (Chunking...)";
-        progressFill.style.width = "40%";
+            if (offset + frameSize <= inputData.length) {
+                // Schedule the next batch to allow the browser to breathe
+                requestAnimationFrame(processNextChunk);
+            } else {
+                // 4. Processing Complete. Rebuild the audio.
+                finishProcessing(outputData);
+            }
+        }
 
-        // 5. Render the filtered audio
-        const renderedBuffer = await offlineCtx.startRendering();
+        // Start the chunking process
+        processNextChunk();
 
-        statusText.innerText = "Encoding to WAV format...";
-        progressFill.style.width = "75%";
+        function finishProcessing(cleanedData) {
+            statusText.innerText = "Encoding to WAV format...";
+            progressFill.style.width = "95%";
+            
+            // Clean up the denoiser memory
+            denoiser.destroy();
 
-        // 6. Encode back to a downloadable WAV file without locking the browser
-        const wavBlob = await audioBufferToWav(renderedBuffer);
-        
-        // 7. Complete and show download
-        downloadUrl = URL.createObjectURL(wavBlob);
-        progressFill.style.width = "100%";
-        statusText.innerText = "Done! Cleaned audio is ready.";
-        downloadBtn.style.display = 'block';
+            // Create a new AudioBuffer with the cleaned data
+            const cleanBuffer = audioCtx.createBuffer(1, cleanedData.length, 48000);
+            cleanBuffer.copyToChannel(cleanedData, 0);
+
+            // Encode to WAV
+            const wavBlob = audioBufferToWav(cleanBuffer);
+            
+            downloadUrl = URL.createObjectURL(wavBlob);
+            progressFill.style.width = "100%";
+            statusText.innerText = "Done! Cleaned audio is ready.";
+            downloadBtn.style.display = 'block';
+        }
 
     } catch (error) {
         console.error(error);
-        statusText.innerText = "Error processing audio. File might be too large.";
+        statusText.innerText = "Error processing audio. Check console.";
         statusText.style.color = "red";
     }
 });
@@ -89,56 +149,41 @@ downloadBtn.addEventListener('click', () => {
     if (!downloadUrl) return;
     const a = document.createElement('a');
     a.href = downloadUrl;
-    a.download = 'cleaned_dictation.wav';
+    a.download = 'cleaned_dictation_ai.wav';
     a.click();
 });
 
-// --- Helper Function: Convert AudioBuffer to WAV ---
-// We break this into a Promise so it doesn't freeze the UI
+// --- Helper Function: Convert AudioBuffer to WAV (Synchronous for simplicity here) ---
 function audioBufferToWav(buffer) {
-    return new Promise((resolve) => {
-        const numOfChan = buffer.numberOfChannels,
-              length = buffer.length * numOfChan * 2 + 44,
-              outBuffer = new ArrayBuffer(length),
-              view = new DataView(outBuffer),
-              channels = [],
-              sampleRate = buffer.sampleRate;
-        let offset = 0,
-            pos = 0;
+    const numOfChan = buffer.numberOfChannels;
+    const length = buffer.length * numOfChan * 2 + 44;
+    const outBuffer = new ArrayBuffer(length);
+    const view = new DataView(outBuffer);
+    const channels = [];
+    const sampleRate = buffer.sampleRate;
+    let offset = 0, pos = 0;
 
-        // Write WAV Header
-        setUint32(0x46464952); // "RIFF"
-        setUint32(length - 8); // file length - 8
-        setUint32(0x45564157); // "WAVE"
-        setUint32(0x20746d66); // "fmt " chunk
-        setUint32(16);         // length = 16
-        setUint16(1);          // PCM (uncompressed)
-        setUint16(numOfChan);
-        setUint32(sampleRate);
-        setUint32(sampleRate * 2 * numOfChan); // avg. bytes/sec
-        setUint16(numOfChan * 2);              // block-align
-        setUint16(16);                         // 16-bit
+    // Write WAV Header
+    setUint32(0x46464952); // "RIFF"
+    setUint32(length - 8); // file length - 8
+    setUint32(0x45564157); // "WAVE"
+    setUint32(0x20746d66); // "fmt " chunk
+    setUint32(16);         // length = 16
+    setUint16(1);          // PCM (uncompressed)
+    setUint16(numOfChan);
+    setUint32(sampleRate);
+    setUint32(sampleRate * 2 * numOfChan); // avg. bytes/sec
+    setUint16(numOfChan * 2);              // block-align
+    setUint16(16);                         // 16-bit
 
-        setUint32(0x61746164); // "data" - chunk
-        setUint32(length - pos - 4);
+    setUint32(0x61746164); // "data" - chunk
+    setUint32(length - pos - 4);
 
-        for (let i = 0; i < buffer.numberOfChannels; i++)
-            channels.push(buffer.getChannelData(i));
+    for (let i = 0; i < buffer.numberOfChannels; i++)
+        channels.push(buffer.getChannelData(i));
 
-        // Interleave channels
-        while (pos < length) {
-            for (let i = 0; i < numOfChan; i++) {
-                let sample = Math.max(-1, Math.min(1, channels[i][offset])); // clamp
-                sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0; // float to 16-bit PCM
-                view.setInt16(pos, sample, true); 
-                pos += 2;
-            }
-            offset++;
-        }
-
-        resolve(new Blob([outBuffer], { type: "audio/wav" }));
-
-        function setUint16(data) { view.setUint16(pos, data, true); pos += 2; }
-        function setUint32(data) { view.setUint32(pos, data, true); pos += 4; }
-    });
-}
+    while (pos < length) {
+        for (let i = 0; i < numOfChan; i++) {
+            let sample = Math.max(-1, Math.min(1, channels[i][offset])); 
+            sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0; 
+            view.setInt16(pos, sample, true);
