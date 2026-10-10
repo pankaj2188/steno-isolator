@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StenoOS | Audio Isolator</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f8fafc; color: #334155; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .container { background: #fff; padding: 40px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); width: 100%; max-width: 500px; text-align: center; border: 1px solid #e2e8f0; }
+        h2 { margin-top: 0; color: #0f172a; }
+        .upload-box { border: 2px dashed #cbd5e1; padding: 40px 20px; border-radius: 8px; margin: 20px 0; background-color: #f1f5f9; cursor: pointer; transition: 0.2s; }
+        .upload-box:hover { border-color: #38bdf8; background-color: #e0f2fe; }
+        input[type="file"] { display: none; }
+        .progress-container { margin-top: 20px; display: none; }
+        .progress-bar { width: 100%; background: #e2e8f0; border-radius: 8px; overflow: hidden; height: 20px; }
+        .progress-fill { height: 100%; background: #38bdf8; width: 0%; transition: width 0.3s; }
+        .status-text { margin-top: 10px; font-size: 14px; color: #64748b; font-weight: 500; }
+        .btn { background: #0f172a; color: #fff; border: none; padding: 12px 24px; border-radius: 6px; font-weight: 600; cursor: pointer; display: none; margin-top: 20px; width: 100%; transition: 0.2s; }
+        .btn:hover { opacity: 0.9; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>🎙️ StenoOS Isolator</h2>
+    <p style="color: #64748b; font-size: 14px;">Local chunk-processing optimized for low-power hardware.</p>
+
+    <label class="upload-box">
+        <span id="file-label">Click to upload dictation file (.wav or .mp3)</span>
+        <input type="file" id="audio-upload" accept="audio/*">
+    </label>
+
+    <div class="progress-container" id="progress-wrapper">
+        <div class="progress-bar">
+            <div class="progress-fill" id="progress-fill"></div>
+        </div>
+        <div class="status-text" id="status-text">Ready to process...</div>
+    </div>
+
+    <button class="btn" id="download-btn">Download Cleaned Audio</button>
+</div>
+
+<script src="processor.js"></script>
+</body>
+</html>
